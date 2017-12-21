@@ -1,10 +1,11 @@
 package com.sunfusheng.viewobject;
 
-import android.support.v7.widget.GridLayoutManager;
-import android.support.v7.widget.LinearLayoutManager;
+import android.support.v4.util.LruCache;
 import android.support.v7.widget.RecyclerView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.BaseAdapter;
+import android.widget.ListView;
 
 import com.sunfusheng.viewobject.delegate.adapter.AdapterDelegatesManager;
 import com.sunfusheng.viewobject.helper.IViewObjectAdapter;
@@ -12,27 +13,29 @@ import com.sunfusheng.viewobject.helper.ViewObjectAdapterImpl;
 import com.sunfusheng.viewobject.helper.ViewObjectComparator;
 import com.sunfusheng.viewobject.viewobject.ViewObject;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @SuppressWarnings("unused")
-public class RecyclerViewVOAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> implements IViewObjectAdapter, IViewObjectAdapter.Callback {
+public class ListViewAdapter extends BaseAdapter implements IViewObjectAdapter, IViewObjectAdapter.Callback {
 
-    private RecyclerView recyclerView;
     private final ViewObjectAdapterImpl viewObjectAdapterImpl;
-    private int prevFirstVisibleItem = RecyclerView.NO_POSITION;
-    private int prevLastVisibleItem = RecyclerView.NO_POSITION;
-    private int firstVisibleItem = RecyclerView.NO_POSITION;
-    private int lastVisibleItem = RecyclerView.NO_POSITION;
+    private final ListView listView;
+    private final int maxViewTypeCount;
+    private int oldListSize = -1;
+    private int oldListHash = -1;
+    private LruCache<ViewObject, RecyclerView.ViewHolder> viewHolderLruCache = new LruCache<>(10);
 
-    public RecyclerViewVOAdapter(RecyclerView recyclerView) {
-        this(recyclerView, null);
+    public ListViewAdapter(ListView listView, int maxViewTypeCount) {
+        this(listView, maxViewTypeCount, null);
     }
 
-    public RecyclerViewVOAdapter(RecyclerView recyclerView, AdapterDelegatesManager adapterDelegatesManager) {
-        this.recyclerView = recyclerView;
-        this.viewObjectAdapterImpl = (adapterDelegatesManager == null) ? new ViewObjectAdapterImpl(this) : new ViewObjectAdapterImpl(adapterDelegatesManager, this);
+    public ListViewAdapter(ListView listView, int maxViewTypeCount, AdapterDelegatesManager adapterDelegatesManager) {
+        this.maxViewTypeCount = maxViewTypeCount;
+        this.viewObjectAdapterImpl = adapterDelegatesManager == null ? new ViewObjectAdapterImpl(this) : new ViewObjectAdapterImpl(adapterDelegatesManager, this);
+        this.listView = listView;
 
-        recyclerView.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+        listView.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override
             public void onViewAttachedToWindow(View v) {
                 viewObjectAdapterImpl.onViewAttachedToWindow();
@@ -43,59 +46,67 @@ public class RecyclerViewVOAdapter extends RecyclerView.Adapter<RecyclerView.Vie
                 viewObjectAdapterImpl.onViewDetachedFromWindow();
             }
         });
-
-        recyclerView.addOnScrollListener(new RecyclerView.OnScrollListener() {
-            @Override
-            public void onScrolled(RecyclerView recyclerView, int dx, int dy) {
-                super.onScrolled(recyclerView, dx, dy);
-
-                if (viewObjectAdapterImpl.hasLifeCycleObserver() && recyclerView.getLayoutManager() instanceof LinearLayoutManager) {
-                    LinearLayoutManager layoutManager = (LinearLayoutManager) recyclerView.getLayoutManager();
-                    firstVisibleItem = layoutManager.findFirstVisibleItemPosition();
-                    lastVisibleItem = layoutManager.findLastVisibleItemPosition();
-
-                    raiseViewObjectScrollNotify();
-                }
-            }
-        });
     }
 
-    private void raiseViewObjectScrollNotify() {
-        if (firstVisibleItem == RecyclerView.NO_POSITION && lastVisibleItem == RecyclerView.NO_POSITION) {
-            return;
-        }
+    @Override
+    public int getCount() {
+        return viewObjectAdapterImpl.getItemCount();
+    }
 
-        for (int i = Math.min(firstVisibleItem, prevFirstVisibleItem); i < Math.max(firstVisibleItem, prevFirstVisibleItem); i++) {
-            ViewObject vo = getViewObject(i);
-            if (vo != null) {
-                vo.dispatchLifeCycleNotify(firstVisibleItem < prevFirstVisibleItem ? ViewObject.LifeCycleNotifyType.onScrollIn : ViewObject.LifeCycleNotifyType.onScrollOut);
+    @Override
+    public Object getItem(int position) {
+        return viewObjectAdapterImpl.getViewObject(position);
+    }
+
+    @Override
+    public long getItemId(int position) {
+        return viewObjectAdapterImpl.getViewObject(position).hashCode();
+    }
+
+    @Override
+    public View getView(int position, View convertView, ViewGroup parent) {
+        RecyclerView.ViewHolder holder;
+        if (convertView == null) {
+            holder = viewObjectAdapterImpl.onCreateViewHolder(parent, getItemViewType(position));
+            convertView = holder.itemView;
+            convertView.setTag(R.id.view_object_tag, getViewObject(position));
+            convertView.setTag(holder);
+            if (!holder.isRecyclable()) {
+                viewHolderLruCache.put(getViewObject(position), holder);
+            }
+        } else {
+            holder = (RecyclerView.ViewHolder) convertView.getTag();
+            if (holder != null && holder.isRecyclable()) {
+                ViewObject viewObject = (ViewObject) convertView.getTag(R.id.view_object_tag);
+                if (viewObject != null) {
+                    viewObject.onViewRecycled();
+                }
+            } else if (holder != null && !holder.isRecyclable() && viewHolderLruCache.get(getViewObject(position)) != null) {
+                holder = viewHolderLruCache.get(getViewObject(position));
+                convertView = holder.itemView;
+            } else {
+                holder = viewObjectAdapterImpl.onCreateViewHolder(parent, getItemViewType(position));
+                convertView = holder.itemView;
+                convertView.setTag(R.id.view_object_tag, getViewObject(position));
+                convertView.setTag(holder);
+                if (!holder.isRecyclable()) {
+                    viewHolderLruCache.put(getViewObject(position), holder);
+                }
             }
         }
 
-        for (int i = Math.min(lastVisibleItem, prevLastVisibleItem); i < Math.max(lastVisibleItem, prevLastVisibleItem); i++) {
-            ViewObject vo = getViewObject(i);
-            if (vo != null) {
-                vo.dispatchLifeCycleNotify(lastVisibleItem > prevLastVisibleItem ? ViewObject.LifeCycleNotifyType.onScrollIn : ViewObject.LifeCycleNotifyType.onScrollOut);
-            }
-        }
+        viewObjectAdapterImpl.onBindViewHolder(holder, position);
+        return convertView;
+    }
 
-        prevFirstVisibleItem = firstVisibleItem;
-        prevLastVisibleItem = lastVisibleItem;
+    @Override
+    public int getViewTypeCount() {
+        return maxViewTypeCount;
     }
 
     @Override
     public int getItemViewType(int position) {
         return viewObjectAdapterImpl.getItemViewType(position);
-    }
-
-    @Override
-    public RecyclerView.ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
-        return viewObjectAdapterImpl.onCreateViewHolder(parent, viewType);
-    }
-
-    @Override
-    public void onBindViewHolder(RecyclerView.ViewHolder holder, int position) {
-        viewObjectAdapterImpl.onBindViewHolder(holder, position);
     }
 
     @Override
@@ -105,41 +116,12 @@ public class RecyclerViewVOAdapter extends RecyclerView.Adapter<RecyclerView.Vie
 
     @Override
     public int getFirstVisibleItemIndex() {
-        if (firstVisibleItem != RecyclerView.NO_POSITION) {
-            return firstVisibleItem;
-        }
-
-        if (recyclerView.getLayoutManager() instanceof LinearLayoutManager) {
-            LinearLayoutManager layoutManager = (LinearLayoutManager) recyclerView.getLayoutManager();
-            return layoutManager.findFirstVisibleItemPosition();
-        }
-
-        return RecyclerView.NO_POSITION;
+        return listView.getFirstVisiblePosition();
     }
 
     @Override
     public int getLastVisibleItemIndex() {
-        if (lastVisibleItem != RecyclerView.NO_POSITION) {
-            return lastVisibleItem;
-        }
-
-        if (recyclerView.getLayoutManager() instanceof LinearLayoutManager) {
-            LinearLayoutManager layoutManager = (LinearLayoutManager) recyclerView.getLayoutManager();
-            return layoutManager.findLastVisibleItemPosition();
-        }
-
-        return RecyclerView.NO_POSITION;
-    }
-
-    @Override
-    public void onViewRecycled(RecyclerView.ViewHolder holder) {
-        if (holder != null) {
-            ViewObject viewObject = viewObjectAdapterImpl.getViewObject(holder.getAdapterPosition());
-            if (viewObject != null) {
-                viewObject.onViewRecycled();
-            }
-        }
-        super.onViewRecycled(holder);
+        return listView.getLastVisiblePosition();
     }
 
     @Override
@@ -284,36 +266,27 @@ public class RecyclerViewVOAdapter extends RecyclerView.Adapter<RecyclerView.Vie
 
     @Override
     public void onInserted(int position, int count) {
-        notifyItemRangeInserted(position, count);
+        notifyDataSetChanged();
     }
 
     @Override
     public void onRemoved(int position, int count) {
-        notifyItemRangeRemoved(position, count);
+        notifyDataSetChanged();
     }
 
     @Override
     public void onMoved(int fromPosition, int toPosition) {
-        notifyItemMoved(fromPosition, toPosition);
+        notifyDataSetChanged();
     }
 
     @Override
     public void onChanged(int position, int count, Object payload) {
-        notifyItemRangeChanged(position, count, payload);
+        notifyDataSetChanged();
     }
 
     @Override
     public int getLayoutSpanCount() {
-        if (recyclerView == null) {
-            return 1;
-        }
-
-        if (!(recyclerView.getLayoutManager() instanceof GridLayoutManager)) {
-            return 1;
-        }
-
-        GridLayoutManager gridLayoutManager = (GridLayoutManager) recyclerView.getLayoutManager();
-        return gridLayoutManager.getSpanCount();
+        return 1;
     }
 
     @Override
@@ -324,5 +297,26 @@ public class RecyclerViewVOAdapter extends RecyclerView.Adapter<RecyclerView.Vie
     @Override
     public void onContextResume() {
         viewObjectAdapterImpl.onContextResume();
+    }
+
+    @Override
+    public void notifyDataSetChanged() {
+        if (oldListSize != viewObjectAdapterImpl.getRawList().size() || oldListHash != viewObjectAdapterImpl.getRawList().hashCode()) {
+            oldListSize = viewObjectAdapterImpl.getRawList().size();
+            oldListHash = viewObjectAdapterImpl.getRawList().hashCode();
+
+            List<ViewObject> viewObjectToRemove = new ArrayList<>();
+            for (ViewObject viewObject : viewHolderLruCache.snapshot().keySet()) {
+                if (!viewObjectAdapterImpl.getList().contains(viewObject)) {
+                    viewObjectToRemove.add(viewObject);
+                }
+            }
+
+            for (ViewObject viewObject : viewObjectToRemove) {
+                viewHolderLruCache.remove(viewObject);
+            }
+
+            super.notifyDataSetChanged();
+        }
     }
 }
