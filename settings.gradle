@@ -1,1 +1,1 @@
-include ':app', ':Library:ViewObject'
+include ':app', ':Library:ViewObject', ':Library:CollectionView'
